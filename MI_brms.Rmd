@@ -1,0 +1,531 @@
+---
+title: "Table2 Posteriors MI"
+author: "Jay Brophy"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document:
+    code_folding: hide
+    highlight: tango
+    theme: cerulean
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+link-citations: yes
+linkcolor: red
+urlcolor: blue
+bibliography: [bib.bib]
+biblio-style: apalike
+---
+
+```{r setup, echo=FALSE, message = FALSE, warning = FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  fig.align = "center")
+
+library(magrittr)
+library(dplyr)
+library(purrr)
+library(forcats)
+library(tidyr)
+library(modelr)
+library(ggdist)
+library(tidybayes)
+library(ggplot2)
+library(cowplot)
+library(rstan)
+library(rstanarm)
+library(brms)
+library(cmdstanr)
+library(RColorBrewer)
+library(here)
+library(knitr)
+library(survey)
+library(tidyverse)
+library(broom)
+library(ggdag)
+library(baymedr) # devtools::install_github("maxlinde/baymedr")
+library(gt) 
+options(knitr.table.format = "html")
+options(knitr.kable.NA = '   ')
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+options(scipen = 1, digits = 3) #set to two decimal 
+
+```
+
+
+## MI posterior probabilities
+### Vague prior
+TC4 data not considering any time clustering.   
+This is done using both logit and identity links
+
+## Possible Priors
+```{r}
+
+b_prior_NA <- c(prior(normal(.16,.1), class=b, coef=drug0),
+              prior(normal(.195,.1), class=b, coef=drug1))
+# b_prior_NA <- prior(normal(log(1.23), ((log(1.50)-log(1.01))/3.92)), class=b, coef=dapt) # PLATO NA prior from US & Canada data above
+b_prior_plato <- prior(normal(log(0.79), ((log(1.15)-log(0.55))/3.92)), class=b, coef=dapt)  # hierarchical PI
+b_prior_plato_pooled <- prior(normal(log(0.84), ((log(0.92)-log(0.77))/3.92)), class=b, coef=dapt) # NEJM pooled analysis
+b_prior_bnma <- prior(normal(log(0.94), ((log(1.17)-log(0.76))/3.92)), class=b, coef=dapt) # stephen thesis supplement table
+
+```
+
+Posterior MI - vague prior with logit link
+
+
+```{r cache=TRUE, warning=FALSE, message=FALSE}
+
+TC4_mi <- data.frame(y = c(46,38), N = c(555,450), drug = as.factor(c("0","1"))) # 0 = clopidogrel
+f = bf(y | trials(N) ~ 0 + drug)
+b_prior_vg <- c(prior(student_t(3, log(1), 5 ), class=b, coef=drug0),
+               prior(student_t(3, log(1), 5 ), class=b, coef=drug1)) # 0 = clopidogrel
+
+tc4_mi_vg <- brm(
+  formula = f,
+  data = TC4_mi,
+  family = binomial(link = "logit"), #identity link probably better than get absolute numbers out can transform post
+  chains = 4, warmup = 1000, iter = 2000, seed = 123,
+  refresh = 0,
+  prior=b_prior_vg, #prior(student_t(3, log(1), 5 ), class=b, coef=dapt_cat1)
+  file = "tc4_bayes_mi_vg_binomial",
+  refresh = 0
+)
+```
+
+```{r}
+prior_summary(tc4_mi_vg)
+print(tc4_mi_vg) # equivalent summary()
+
+draws <- as_draws_df(tc4_mi_vg) # posterior_samples is equivalent outdated command
+
+# since working with binomial link need this function to back transform
+expit <- function(x){
+  return(exp(x)/(1+exp(x)))
+}
+
+draws <- draws %>% 
+  # rename and drop the unneeded columns
+  transmute(p0 = expit(b_drug0),        # expit since used logit link no need for this function if identity link
+            p1 = expit(b_drug1)) %>% 
+  # compute the OR
+  mutate(or = (p1 / (1 - p1)) / (p0 / (1 - p0)), rr = p1 /p0)
+
+temp <- round(quantile(draws$rr, c(0.025, 0.5, 0.975)),2)
+paste0("RR = ", temp[2],  " 95% CI ",  temp[1], " - ", temp[3] )
+
+
+# MI model - vg prior
+draws %>% 
+  ggplot(aes(x=rr, y=0)) + 
+  stat_halfeye(.width = c(0.025, 0.975)) + 
+  scale_y_continuous(NULL, breaks = NULL) + 
+  xlab("MI RR (ticagrelor vs. clopidogrel[ref])") +
+  theme(panel.grid = element_blank()) +
+  geom_vline(xintercept = c(0.9,1.11), colour="black", linetype="dashed") +
+  geom_vline(xintercept = 1, colour="black", linetype="solid") +
+  scale_x_continuous(limits = c(0, 2), expand = c(0, 0)) +
+  ggtitle("MI with vague prior")
+
+
+plot(tc4_mi_vg)
+grDevices::cairo_pdf("output/MI_vg.pdf", width = 6, height = 6, family = "Arial")
+plot(tc4_mi_vg, digits = 2, base_size = 10)
+dev.off()
+
+prop0.9_mi <- sum(draws$rr<0.9)/nrow(draws)
+prop1.0_mi <- sum(draws$rr<1.0)/nrow(draws)
+prop1.1_mi <- sum(draws$rr>1.1)/nrow(draws)
+
+cat("Pr(HR<0.9): ", prop0.9_mi,
+    "\nPr(HR<1.0): ", prop1.0_mi,
+    "\nPr(HR>1.1): ", prop1.1_mi,
+    "\nPr(HR[0.9, 1.1]): ", 1-prop1.1_mi-prop0.9_mi)
+
+```
+Using a vague deaths prior , the MI posterior distribution is a N(`r temp[2]`, `r (temp[3] - temp[2])/1.96 `)     
+
+
+Posterior MI - vague prior with identity link
+
+```{r cache=TRUE, warning=FALSE, message=FALSE}
+
+tc4_mi_vg_identity <- brm(
+  formula = f,
+  data = TC4_mi,
+  family = binomial(link = "identity"), #identity link probably better than get absolute numbers out can transform post
+  chains = 4, warmup = 1000, iter = 2000, seed = 123,
+  refresh = 0,
+  prior=b_prior_vg, #prior(student_t(3, log(1), 5 ), class=b, coef=dapt_cat1)
+  refresh = 0
+)
+
+```
+
+```{r}
+prior_summary(tc4_mi_vg_identity)
+print(tc4_mi_vg_identity) # equivalent summary(m_logit)
+
+draws <- as_draws_df(tc4_mi_vg_identity) # posterior_samples is equivalent command
+
+draws <- draws %>% 
+  # rename and drop the unneeded columns
+  transmute(p0 = b_drug0,   # expit not used since identity link
+            p1 = b_drug1) %>% 
+  # compute the OR
+  mutate(or = (p1 / (1 - p1)) / (p0 / (1 - p0)), rr = p1 /p0)
+
+
+temp <- round(quantile(draws$rr, c(0.025, 0.5, 0.975)),2)
+paste0("RR = ", temp[2],  " 95% CI ",  temp[1], " - ", temp[3] )
+
+
+# MI model - vg prior
+draws %>% 
+  ggplot(aes(x=rr, y=0)) + 
+  stat_halfeye(.width = c(0.025, 0.975)) + 
+  scale_y_continuous(NULL, breaks = NULL) + 
+  xlab("MI RR (ticagrelor vs. clopidogrel[ref])") +
+  theme(panel.grid = element_blank()) +
+  geom_vline(xintercept = c(0.9,1.11), colour="black", linetype="dashed") +
+  geom_vline(xintercept = 1, colour="black", linetype="solid") +
+  scale_x_continuous(limits = c(0, 2), expand = c(0, 0)) +
+  ggtitle("MI with vague prior")
+
+
+
+plot(tc4_mi_vg_identity)
+grDevices::cairo_pdf("output/MI_vgI.pdf", width = 6, height = 6, family = "Arial")
+plot(tc4_mi_vg_identity, digits = 2, base_size = 10)
+dev.off()
+
+prop0.9_mi <- sum(draws$rr<0.9)/nrow(draws)
+prop1.0_mi <- sum(draws$rr<1.0)/nrow(draws)
+prop1.1_mi <- sum(draws$rr>1.1)/nrow(draws)
+
+cat("Pr(HR<0.9): ", prop0.9_mi,
+    "\nPr(HR<1.0): ", prop1.0_mi,
+    "\nPr(HR>1.1): ", prop1.1_mi,
+    "\nPr(HR[0.9, 1.1]): ", 1-prop1.1_mi-prop0.9_mi)
+
+```
+
+Using a vague prior , the  MIposterior distribution is a N(`r temp[2]`, `r (temp[3] - temp[2])/1.96 `)       
+Essentially same results from logit or identity link, as expected
+
+Diagnostics
+```{r}
+pairs(tc4_mi_vg)
+plot(tc4_mi_vg, ask=F)
+```
+
+```{r}
+mcmc_areas(draws,
+           pars = "rr",
+           prob = 0.95)
+```
+
+## NA prior - with identity link
+### Canada & US MI data from PLATO
+
+```{r fig.width=10, fig.height=6, warning=FALSE, message=FALSE}
+
+# NA total Canada 35/31 US 178/142 deaths CDN 7/5  US 29/24
+# assume no strokes so MI CDN 28/26 US 149/118
+
+### MI
+
+plot_NA_MI <- meta::metabin(event.e=c(149,28), event.c=c(118,26), n.e=c(706,200), n.c=c(706,200), sm="RR", method ="I", 
+    studlab=c("US", "CDN"), prediction=TRUE, comb.random =TRUE) #, comb.random =TRUE
+meta::forest(plot_NA_MI, rows.gr=50)
+
+pdf("PI_death_NA.pdf", height = 12, width = 11)
+meta::forest(plot_NA_MI, rows.gr=50)
+dev.off()
+
+```
+
+Use this data to create priors for effectiveness of ticagrelor vs. clopidogrel 
+
+```{r warning=FALSE, message=FALSE, cache=TRUE}
+# Use stan directly to get the prior for each arm
+basic_binom <- cmdstan_model("binomial1.stan")
+
+set.seed(123)
+tic <- rbinom(906, size=1, prob= 0.195)
+clop <- rbinom(906, size=1, prob= 0.159)
+
+basic_binom_fit <- basic_binom$sample(data=list(N = length(tic),
+                                                x = tic),
+                                      iter_warmup=1000,
+                                      iter_sampling=1000,
+                                      refresh = 0,
+                                      chains = 1)
+print(basic_binom_fit)
+
+basic_binom_fit1 <- basic_binom$sample(data=list(N = length(clop),
+                                                x = clop),
+                                      iter_warmup=1000,
+                                      iter_sampling=1000,
+                                      refresh = 0,
+                                      chains = 1)
+
+print(basic_binom_fit1)
+
+RR <- as_draws_df(basic_binom_fit)[,2] / as_draws_df(basic_binom_fit1)[,2]
+NA_prior <- quantile(RR[,1], c(0.025, 0.5, 0.975))
+paste0("NA prior for MI is mean = ", round(NA_prior[2],2), " with 95% CI ", round(NA_prior[1], 2)," to ", round(NA_prior[3],2), " or n(", round(NA_prior[2], 2),", ", round((NA_prior[3]-NA_prior[2])/1.962,2), ")")
+```
+
+
+```{r cache=TRUE, warning=FALSE, message=FALSE}
+b_prior_NA <- c(prior(normal(.16,.1), class=b, coef=drug0),
+              prior(normal(.195,.1), class=b, coef=drug1))
+
+tc4_mi_NA_identity <- brm(
+  formula = f,
+  data = TC4_mi,
+  family = binomial(link = "identity"), #identity link probably better than get absolute numbers out can transform post
+  chains = 4, warmup = 1000, iter = 2000, seed = 123,
+  refresh = 0,
+  prior=b_prior_NA, #prior(student_t(3, log(1), 5 ), class=b, coef=dapt_cat1)
+  file = "tc4_mi_NA",
+  refresh = 0
+)
+
+
+prior_summary(tc4_mi_NA_identity)
+print(tc4_mi_NA_identity) # equivalent summary(m_logit)
+
+draws <- as_draws_df(tc4_mi_NA_identity) # posterior_samples is equivalent command
+# what have we done?
+head(draws)
+
+draws <- draws %>% 
+  # rename and drop the unneeded columns
+  transmute(p0 = b_drug0,   # expit not used since identity link
+            p1 = b_drug1) %>% 
+  # compute the OR
+  mutate(or = (p1 / (1 - p1)) / (p0 / (1 - p0)), rr = p1 /p0)
+head(draws)
+
+temp <- round(quantile(draws$rr, c(0.025, 0.5, 0.975)),2)
+paste0("RR = ", temp[2],  " 95% CI ",  temp[1], " - ", temp[3] )
+
+
+# MI model - NA prior
+draws %>% 
+  ggplot(aes(x=rr, y=0)) + 
+  stat_halfeye(.width = c(0.025, 0.975)) + 
+  scale_y_continuous(NULL, breaks = NULL) + 
+  xlab("MI RR (ticagrelor vs. clopidogrel[ref])") +
+  theme(panel.grid = element_blank()) +
+  geom_vline(xintercept = c(0.9,1.11), colour="black", linetype="dashed") +
+  geom_vline(xintercept = 1, colour="black", linetype="solid") +
+  scale_x_continuous(limits = c(0, 2), expand = c(0, 0)) +
+  ggtitle("NA prior")
+
+
+plot(tc4_mi_NA_identity)
+grDevices::cairo_pdf("output/MI_NAprior.pdf", width = 6, height = 6, family = "Arial")
+plot(tc4_mi_NA_identity, digits = 2, base_size = 10)
+dev.off()
+
+prop0.9_mi <- sum(draws$rr<0.9)/nrow(draws)
+prop1.0_mi <- sum(draws$rr<1.0)/nrow(draws)
+prop1.1_mi <- sum(draws$rr>1.1)/nrow(draws)
+
+cat("Pr(HR<0.9): ", prop0.9_mi,
+    "\nPr(HR<1.0): ", prop1.0_mi,
+    "\nPr(HR>1.1): ", prop1.1_mi,
+    "\nPr(HR[0.9, 1.1]): ", 1-prop1.1_mi-prop0.9_mi)
+
+```
+
+Using a NA prior from PLATO, the  MI posterior distribution is a N(`r temp[2]`, `r (temp[3] - temp[2])/1.96 `)       
+
+Diagnostics
+```{r}
+pairs(tc4_mi_NA_identity)
+plot(tc4_mi_NA_identity, ask=F)
+```
+
+```{r}
+mcmc_areas(draws,
+           pars = "rr",
+           prob = 0.95)
+```
+
+
+## PLATO MI prior - with identity link
+
+
+Use this NEJM data to create priors for effectiveness of ticagrelor  (504/9333) vs. clopidogrel (593/9291)
+
+```{r warning=FALSE, message=FALSE, cache=TRUE}
+# Use stan directly to get the prior for each arm
+basic_binom <- cmdstan_model("binomial1.stan")
+
+set.seed(123)
+tic <- rbinom(9333, size=1, prob= 0.054) # 504/9333
+clop <- rbinom(9291, size=1, prob= 0.0638) # 593/9291
+
+basic_binom_fit <- basic_binom$sample(data=list(N = length(tic),
+                                                x = tic),
+                                      iter_warmup=1000,
+                                      iter_sampling=1000,
+                                      refresh = 0,
+                                      chains = 1)
+print(basic_binom_fit)
+
+basic_binom_fit1 <- basic_binom$sample(data=list(N = length(clop),
+                                                 x = clop),
+                                       iter_warmup=1000,
+                                       iter_sampling=1000,
+                                       refresh = 0,
+                                       chains = 1)
+
+print(basic_binom_fit1)
+
+RR <- as_draws_df(basic_binom_fit)[,2] / as_draws_df(basic_binom_fit1)[,2]
+NA_prior <- quantile(RR[,1], c(0.025, 0.5, 0.975))
+paste0("PLATO prior for MI is mean = ", round(NA_prior[2],2), " with 95% CI ", round(NA_prior[1], 2)," to ", round(NA_prior[3],2), " or n(", round(NA_prior[2], 2),", ", round((NA_prior[3]-NA_prior[2])/1.962,2), ")")
+```
+
+However this assumes completely pooled data with no heterogeneity between countries. Based on MACE and deaths where we have country specific data, we can see that there is some heterogeneity between countries with an approximate doubling of the SE.    
+Therefore will use N(0.83, 0.12) as the prior for the PLATO data
+
+```{r cache=TRUE, warning=FALSE, message=FALSE}
+f = bf(y | trials(N) ~ 0 + drug)
+
+m_PLATO <- brm(
+  formula = f,
+  data = TC4_mi,
+  family = binomial(link = "identity"),
+  prior = c(prior(beta(593,8698), class = b, coef = "drug0"),
+            prior(beta(504,8294),class = b, coef = "drug1")),
+  chains = 4, warmup = 1000, iter = 2000, seed = 123,
+  refresh = 0
+)
+
+print(m_PLATO)
+
+prior_summary(m_PLATO)
+print(m_PLATO) # equivalent summary(m_logit)
+
+draws <- as_draws_df(m_PLATO) # posterior_samples is equivalent command
+# what have we done?
+head(draws)
+
+draws <- draws %>% 
+  # rename and drop the unneeded columns
+  transmute(p0 = b_drug0,   # expit not used since identity link
+            p1 = b_drug1) %>% 
+  # compute the OR
+  mutate(or = (p1 / (1 - p1)) / (p0 / (1 - p0)), rr = p1 /p0)
+head(draws)
+
+temp <- round(quantile(draws$rr, c(0.025, 0.5, 0.975)),2)
+paste0("RR = ", temp[2],  " 95% CI ",  temp[1], " - ", temp[3] )
+
+
+# MI model - PLATO prior
+draws %>% 
+  ggplot(aes(x=rr, y=0)) + 
+  stat_halfeye(.width = c(0.025, 0.975)) + 
+  scale_y_continuous(NULL, breaks = NULL) + 
+  xlab("MI RR (ticagrelor vs. clopidogrel[ref])") +
+  theme(panel.grid = element_blank()) +
+  geom_vline(xintercept = c(0.9,1.11), colour="black", linetype="dashed") +
+  geom_vline(xintercept = 1, colour="black", linetype="solid") +
+  scale_x_continuous(limits = c(0.5, 1.5), expand = c(0, 0)) +
+  ggtitle("PLATO prior")
+
+
+plot(m_PLATO)
+grDevices::cairo_pdf("output/MI_PLATOprior.pdf", width = 6, height = 6, family = "Arial")
+plot(m_PLATO, digits = 2, base_size = 10)
+dev.off()
+
+prop0.9_mi <- sum(draws$rr<0.9)/nrow(draws)
+prop1.0_mi <- sum(draws$rr<1.0)/nrow(draws)
+prop1.1_mi <- sum(draws$rr>1.1)/nrow(draws)
+
+cat("Pr(HR<0.9): ", prop0.9_mi,
+    "\nPr(HR<1.0): ", prop1.0_mi,
+    "\nPr(HR>1.1): ", prop1.1_mi,
+    "\nPr(HR[0.9, 1.1]): ", 1-prop1.1_mi-prop0.9_mi)
+```
+
+
+## BNMA MI prior - with identity link
+
+
+Use this BNMA data to create priors for effectiveness of ticagrelor  (750 / 16020) vs. clopidogrel (1798/ 26189), which is  N(0.86, 0.13) as the prior for the BNMA data
+
+```{r cache=TRUE, warning=FALSE, message=FALSE}
+# useful function to get beta parameters from a normal distribution
+
+
+f = bf(y | trials(N) ~ 0 + drug)
+
+m_BNMA <- brm(
+  formula = f,
+  data = TC4_mi,
+  family = binomial(link = "identity"),
+  prior = c(prior(normal(1,.11), class = b, coef = "drug0"),
+            prior(normal(0.96,0.11),class = b, coef = "drug1")),
+  chains = 4, warmup = 1000, iter = 2000, seed = 123,
+  refresh = 0
+)
+
+print(m_BNMA)
+
+prior_summary(m_BNMA)
+print(m_BNMA) # equivalent summary(m_logit)
+
+draws <- as_draws_df(m_BNMA) # posterior_samples is equivalent command
+# what have we done?
+head(draws)
+
+draws <- draws %>% 
+  # rename and drop the unneeded columns
+  transmute(p0 = b_drug0,   # expit not used since identity link
+            p1 = b_drug1) %>% 
+  # compute the OR
+  mutate(or = (p1 / (1 - p1)) / (p0 / (1 - p0)), rr = p1 /p0)
+head(draws)
+
+temp <- round(quantile(draws$rr, c(0.025, 0.5, 0.975)),2)
+paste0("RR = ", temp[2],  " 95% CI ",  temp[1], " - ", temp[3] )
+
+
+# MI model - BNMA prior
+draws %>% 
+  ggplot(aes(x=rr, y=0)) + 
+  stat_halfeye(.width = c(0.025, 0.975)) + 
+  scale_y_continuous(NULL, breaks = NULL) + 
+  xlab("MI RR (ticagrelor vs. clopidogrel[ref])") +
+  theme(panel.grid = element_blank()) +
+  geom_vline(xintercept = c(0.9,1.11), colour="black", linetype="dashed") +
+  geom_vline(xintercept = 1, colour="black", linetype="solid") +
+  scale_x_continuous(limits = c(0, 2), expand = c(0, 0)) +
+  ggtitle("BNMA prior")
+
+
+plot(m_BNMA)
+grDevices::cairo_pdf("output/MI_BNMAprior.pdf", width = 6, height = 6, family = "Arial")
+plot(m_BNMA, digits = 2, base_size = 10)
+dev.off()
+
+prop0.9_mi <- sum(draws$rr<0.9)/nrow(draws)
+prop1.0_mi <- sum(draws$rr<1.0)/nrow(draws)
+prop1.1_mi <- sum(draws$rr>1.1)/nrow(draws)
+
+cat("Pr(HR<0.9): ", prop0.9_mi,
+    "\nPr(HR<1.0): ", prop1.0_mi,
+    "\nPr(HR>1.1): ", prop1.1_mi,
+    "\nPr(HR[0.9, 1.1]): ", 1-prop1.1_mi-prop0.9_mi)
+```
+

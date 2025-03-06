@@ -1,0 +1,409 @@
+---
+title: "Table2 Posteriors Stoke"
+author: "Jay Brophy"
+output:
+  html_document:
+    code_folding: hide
+    highlight: tango
+    theme: cerulean
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+---
+
+```{r setup, include=FALSE, results='hide'}
+knitr::opts_chunk$set(echo = TRUE)
+options(scipen = 1, digits = 3)
+library(tidyverse, brms) #bayesplot to install
+library(brms)
+library(bayesplot)
+library(ggdist)
+library(tidybayes)
+library(ggplot2)
+library(grid)
+library(grDevices)
+library(magrittr)
+library(cmdstanr)
+
+
+#tc4_dat1 <- readRDS("output/tc4_dat1.rds")
+```
+
+## Creating Table 2 Stroke posterior probabilities
+
+Prios in Table 2 include both vague na dinformative based on previous studies.
+
+
+
+## Vague prior
+### Posterior stroke - vague prior with identity link
+TC4 data not considering any clustering
+
+```{r cache=TRUE, warning=FALSE, message=FALSE}
+
+TC4_stroke <- data.frame(y = c(3,5), N = c(555,450), drug = as.factor(c("0","1"))) # 0 = clopidogrel
+
+b_prior_vg <- c(prior(student_t(3, log(1), 5 ), class=b, coef=drug0),
+               prior(student_t(3, log(1), 5 ), class=b, coef=drug1)) # 0 = clopidogrel
+
+f = bf(y | trials(N) ~ 0 + drug)
+b_prior_vg <- c(prior(student_t(3, log(1), 5 ), class=b, coef=drug0),
+               prior(student_t(3, log(1), 5 ), class=b, coef=drug1))
+
+tc4_stroke_vg <- brm(
+  formula = f,
+  data = TC4_stroke,
+  family = binomial(link = "identity"), #identity link probably better than get absolute numbers out can transform post
+  chains = 4, warmup = 1000, iter = 2000, seed = 123,
+  refresh = 0,
+  prior=b_prior_vg, #prior(student_t(3, log(1), 5 ), class=b, coef=dapt_cat1)
+  file = "tc4_stroke_vg",
+  file_refit = "on_change",
+  refresh = 0
+)
+
+
+prior_summary(tc4_stroke_vg)
+print(tc4_stroke_vg) # equivalent summary()
+
+draws <- as_draws_df(tc4_stroke_vg) # posterior_samples is equivalent outdated command
+
+draws <- draws %>% 
+  # rename and drop the unneeded columns
+  transmute(p0 = b_drug0,   # expit not used since identity link
+            p1 = b_drug1) %>% 
+  # compute the OR
+  mutate(or = (p1 / (1 - p1)) / (p0 / (1 - p0)), rr = p1 /p0)
+
+
+temp <- round(quantile(draws$rr, c(0.025, 0.5, 0.975)),2)
+paste0("RR = ", temp[2],  " 95% CI ",  temp[1], " - ", temp[3] )
+
+
+# Stroke model - vg prior
+draws %>% 
+  ggplot(aes(x=rr, y=0)) + 
+  stat_halfeye(.width = c(0.025, 0.975)) + 
+  scale_y_continuous(NULL, breaks = NULL) + 
+  xlab("Strok RR (ticagrelor vs. clopidogrel[ref])") +
+  theme(panel.grid = element_blank()) +
+  geom_vline(xintercept = c(0.9,1.11), colour="black", linetype="dashed") +
+  geom_vline(xintercept = 1, colour="black", linetype="solid") +
+  scale_x_continuous(limits = c(0, 8), expand = c(0, 0))
+
+
+plot(tc4_stroke_vg)
+grDevices::cairo_pdf("output/tc4_stroke_vg.pdf", width = 6, height = 6, family = "Arial")
+plot(tc4_stroke_vg, digits = 2, base_size = 10)
+dev.off()
+
+prop0.9_mi <- sum(draws$rr<0.9)/nrow(draws)
+prop1.0_mi <- sum(draws$rr<1.0)/nrow(draws)
+prop1.1_mi <- sum(draws$rr>1.1)/nrow(draws)
+
+cat("Pr(HR<0.9): ", prop0.9_mi,
+    "\nPr(HR<1.0): ", prop1.0_mi,
+    "\nPr(HR>1.1): ", prop1.1_mi,
+    "\nPr(HR[0.9, 1.1]): ", 1-prop1.1_mi-prop0.9_mi)
+
+```
+Using a vague deaths prior , the MI posterior distribution is a N(`r temp[2]`, `r (temp[3] - temp[2])/1.96 `)     
+
+
+Diagnostics
+```{r}
+pairs(tc4_stroke_vg)
+plot(tc4_stroke_vg, ask=F)
+```
+
+```{r}
+mcmc_areas(draws,
+           pars = "rr",
+           prob = 0.95)
+```
+
+## PLATO NA stroke prior 
+There was US only stroke data available for the PLATO NA cohort.    
+![](FDA_US_OUS.png)
+
+Use `brms` to get the posterior distribution for the PLATO US stroke prior
+
+```{r cache=TRUE, warning=FALSE, message=FALSE, results='hide'}
+set.seed(123)
+
+TC4_stroke_NA <- brm(
+  formula = f,
+  data = TC4_stroke,
+  family = binomial(link = "identity"), #identity link probably better than get absolute numbers out can transform post
+  chains = 4, warmup = 1000, iter = 2000, seed = 123,
+  refresh = 0,
+  prior = c(prior(beta(4,702), class = b, coef = "drug0"),  
+            prior(beta(7,699),class = b, coef = "drug1")), 
+#  file = "TC4_stroke_NA",
+#  file_refit = "on_change",
+  refresh = 0
+)
+```
+
+```{r cache=TRUE, warning=FALSE, message=FALSE}
+prior_summary(TC4_stroke_NA)
+print(TC4_stroke_NA) # equivalent summary(m_logit)
+
+draws <- as_draws_df(TC4_stroke_NA) # posterior_samples is equivalent command
+
+draws <- draws %>% 
+  # rename and drop the unneeded columns
+  transmute(p0 = b_drug0,   # expit not used since identity link
+            p1 = b_drug1) %>% 
+  # compute the OR
+  mutate(or = (p1 / (1 - p1)) / (p0 / (1 - p0)), rr = p1 /p0)
+
+temp <- round(quantile(draws$rr, c(0.025, 0.5, 0.975)),2)
+paste0("RR = ", temp[2],  " 95% CI ",  temp[1], " - ", temp[3] )
+
+
+# bleeding model - PLATO prior
+draws %>% 
+  ggplot(aes(x=rr, y=0)) + 
+  stat_halfeye(.width = c(0.025, 0.975)) + 
+  scale_y_continuous(NULL, breaks = NULL) + 
+  xlab("stoke RR (ticagrelor vs. clopidogrel[ref])") +
+  theme(panel.grid = element_blank()) +
+  geom_vline(xintercept = c(0.9,1.11), colour="black", linetype="dashed") +
+  geom_vline(xintercept = 1, colour="black", linetype="solid") +
+  scale_x_continuous(limits = c(0.5, 2), expand = c(0, 0)) +
+  ggtitle("Stroke with US prior")
+
+
+plot(TC4_stroke_NA)
+grDevices::cairo_pdf("output/stroke_NA.pdf", width = 6, height = 6, family = "Arial")
+plot(TC4_stroke_NA, digits = 2, base_size = 10)
+dev.off()
+
+prop0.9_mi <- sum(draws$rr<0.9)/nrow(draws)
+prop1.0_mi <- sum(draws$rr<1.0)/nrow(draws)
+prop1.1_mi <- sum(draws$rr>1.1)/nrow(draws)
+
+cat("Pr(HR<0.9): ", prop0.9_mi,
+    "\nPr(HR<1.0): ", prop1.0_mi,
+    "\nPr(HR>1.1): ", prop1.1_mi,
+    "\nPr(HR[0.9, 1.1]): ", 1-prop1.1_mi-prop0.9_mi)
+
+```
+
+## PLATO all data stroke prior 
+
+Use `brms` to get the posterior distribution for the PLATO stroke prior
+
+```{r cache=TRUE, warning=FALSE, message=FALSE, results='hide'}
+set.seed(123)
+tic <- rbinom(9333, size=1, prob= 125/9333)
+clop <- rbinom(9291, size=1, prob= 106/9291)
+mean_c <- mean(clop)
+sd_c <- sd(clop)
+mean_t <- mean(tic)
+sd_t <- sd(tic)
+
+
+tc4_stroke_PLATO <- brm(
+  formula = f,
+  data = TC4_stroke,
+  family = binomial(link = "identity"), #identity link probably better than get absolute numbers out can transform post
+  chains = 4, warmup = 1000, iter = 2000, seed = 123,
+  refresh = 0,
+  prior = c(prior(beta(106,9185), class = b, coef = "drug0"),  
+            prior(beta(125,9208),class = b, coef = "drug1")), 
+#  file = "tc4_stroke_PLATO",
+#  file_refit = "on_change",
+  refresh = 0
+)
+```
+
+```{r cache=TRUE, warning=FALSE, message=FALSE}
+prior_summary(tc4_stroke_PLATO)
+print(tc4_stroke_PLATO) # equivalent summary(m_logit)
+
+draws <- as_draws_df(tc4_stroke_PLATO) # posterior_samples is equivalent command
+
+draws <- draws %>% 
+  # rename and drop the unneeded columns
+  transmute(p0 = b_drug0,   # expit not used since identity link
+            p1 = b_drug1) %>% 
+  # compute the OR
+  mutate(or = (p1 / (1 - p1)) / (p0 / (1 - p0)), rr = p1 /p0)
+
+temp <- round(quantile(draws$rr, c(0.025, 0.5, 0.975)),2)
+paste0("RR = ", temp[2],  " 95% CI ",  temp[1], " - ", temp[3] )
+
+
+# stroke model - PLATO prior
+draws %>% 
+  ggplot(aes(x=rr, y=0)) + 
+  stat_halfeye(.width = c(0.025, 0.975)) + 
+  scale_y_continuous(NULL, breaks = NULL) + 
+  xlab("Stroke RR (ticagrelor vs. clopidogrel[ref])") +
+  theme(panel.grid = element_blank()) +
+  geom_vline(xintercept = c(0.9,1.11), colour="black", linetype="dashed") +
+  geom_vline(xintercept = 1, colour="black", linetype="solid") +
+  scale_x_continuous(limits = c(0.5, 2), expand = c(0, 0)) +
+  ggtitle("Stroke with PLATO prior")
+
+
+plot(tc4_stroke_PLATO)
+grDevices::cairo_pdf("output/stroke_PLATO.pdf", width = 6, height = 6, family = "Arial")
+plot(tc4_stroke_PLATO, digits = 2, base_size = 10)
+dev.off()
+
+prop0.9_mi <- sum(draws$rr<0.9)/nrow(draws)
+prop1.0_mi <- sum(draws$rr<1.0)/nrow(draws)
+prop1.1_mi <- sum(draws$rr>1.1)/nrow(draws)
+
+cat("Pr(HR<0.9): ", prop0.9_mi,
+    "\nPr(HR<1.0): ", prop1.0_mi,
+    "\nPr(HR>1.1): ", prop1.1_mi,
+    "\nPr(HR[0.9, 1.1]): ", 1-prop1.1_mi-prop0.9_mi)
+
+```
+
+Using a full PLATO stroke prior, the  stroke posterior distribution is a N(`r temp[2]`, `r (temp[3] - temp[2])/1.96 `)       
+
+Diagnostics
+```{r}
+pairs(tc4_stroke_PLATO)
+plot(tc4_stroke_PLATO, ask=F)
+```
+
+```{r}
+mcmc_areas(draws,
+           pars = "rr",
+           prob = 0.95)
+```
+
+
+## BNMA stroke prior 
+
+Use BNMA data to create priors for effectiveness of ticagrelor  (203 / 15373) vs. clopidogrel (305 / 25543), which is  N(1.02, 1.33) as the prior for the BNMA data
+
+```{r fig.width=10, fig.height=6, warning=FALSE, message=FALSE, cache=TRUE}
+
+# Use stan directly to get the prior for each arm
+basic_binom <- cmdstan_model("binomial1.stan")
+
+set.seed(123)
+tic <- rbinom(15373, size=1, prob= 203/15373)
+clop <- rbinom(25543, size=1, prob= 305/25543)
+
+
+basic_binom_fit <- basic_binom$sample(data=list(N = length(tic),
+                                                x = tic),
+                                      iter_warmup=1000,
+                                      iter_sampling=1000,
+                                      refresh = 0,
+                                      chains = 1)
+print(basic_binom_fit)
+
+basic_binom_fit1 <- basic_binom$sample(data=list(N = length(clop),
+                                                x = clop),
+                                      iter_warmup=1000,
+                                      iter_sampling=1000,
+                                      refresh = 0,
+                                      chains = 1)
+
+print(basic_binom_fit1)
+
+
+RR <- as_draws_df(basic_binom_fit)[,2] / as_draws_df(basic_binom_fit1)[,2]
+BNMA_prior <- quantile(RR[,1], c(0.025, 0.5, 0.975))
+paste0("Stroke posterior for BNMA stroke prior is mean = ", round(BNMA_prior[2],2), " with 95% CI ", round(BNMA_prior[1], 2)," to ", round(BNMA_prior[3],2), " or n(", round(BNMA_prior[2], 2),", ", round((BNMA_prior[3]-BNMA_prior[2])/1.962,2), ")")
+
+prop0.9_mi <- sum(RR<0.9)/nrow(RR)
+prop1.0_mi <- sum(RR<1.0)/nrow(RR)
+prop1.1_mi <- sum(RR>1.1)/nrow(RR)
+
+cat("Pr(HR<0.9): ", prop0.9_mi,
+    "\nPr(HR<1.0): ", prop1.0_mi,
+    "\nPr(HR>1.1): ", prop1.1_mi,
+    "\nPr(HR[0.9, 1.1]): ", 1-prop1.1_mi-prop0.9_mi)
+
+```
+
+
+Use `brms` to get the posterior distribution for the BNMA stroke prior
+
+```{r cache=TRUE, warning=FALSE, message=FALSE, results='hide'}
+
+tc4_stroke_BNMA <- brm(
+  formula = f,
+  data = TC4_stroke,
+  family = binomial(link = "identity"), #identity link probably better than get absolute numbers out can transform post
+  chains = 4, warmup = 1000, iter = 2000, seed = 123,
+  refresh = 0,
+  prior = c(prior(beta(305,25238), class = b, coef = "drug0"),  
+            prior(beta(203,15170),class = b, coef = "drug1")), 
+#  file = "tc4_stroke_PLATO_brms",
+#  file_refit = "on_change",
+  refresh = 0
+)
+```
+
+```{r cache=TRUE, warning=FALSE, message=FALSE}
+prior_summary(tc4_stroke_BNMA)
+print(tc4_stroke_BNMA) # equivalent summary(m_logit)
+
+draws <- as_draws_df(tc4_stroke_BNMA) # posterior_samples is equivalent command
+
+draws <- draws %>% 
+  # rename and drop the unneeded columns
+  transmute(p0 = b_drug0,   # expit not used since identity link
+            p1 = b_drug1) %>% 
+  # compute the OR
+  mutate(or = (p1 / (1 - p1)) / (p0 / (1 - p0)), rr = p1 /p0)
+
+temp <- round(quantile(draws$rr, c(0.025, 0.5, 0.975)),2)
+paste0("RR = ", temp[2],  " 95% CI ",  temp[1], " - ", temp[3] )
+
+
+# stroke model - BNMA prior
+draws %>% 
+  ggplot(aes(x=rr, y=0)) + 
+  stat_halfeye(.width = c(0.025, 0.975)) + 
+  scale_y_continuous(NULL, breaks = NULL) + 
+  xlab("Stroke RR (ticagrelor vs. clopidogrel[ref])") +
+  theme(panel.grid = element_blank()) +
+  geom_vline(xintercept = c(0.9,1.11), colour="black", linetype="dashed") +
+  geom_vline(xintercept = 1, colour="black", linetype="solid") +
+  scale_x_continuous(limits = c(0.5, 2), expand = c(0, 0)) +
+  ggtitle("BNMA prior")
+
+
+plot(tc4_stroke_BNMA)
+grDevices::cairo_pdf("output/stroke_BNMA.pdf", width = 6, height = 6, family = "Arial")
+plot(tc4_stroke_BNMA, digits = 2, base_size = 10)
+dev.off()
+
+prop0.9_mi <- sum(draws$rr<0.9)/nrow(draws)
+prop1.0_mi <- sum(draws$rr<1.0)/nrow(draws)
+prop1.1_mi <- sum(draws$rr>1.1)/nrow(draws)
+
+cat("Pr(HR<0.9): ", prop0.9_mi,
+    "\nPr(HR<1.0): ", prop1.0_mi,
+    "\nPr(HR>1.1): ", prop1.1_mi,
+    "\nPr(HR[0.9, 1.1]): ", 1-prop1.1_mi-prop0.9_mi)
+
+```
+
+Using a full PLATO stroke prior, the  stroke posterior distribution is a N(`r temp[2]`, `r (temp[3] - temp[2])/1.96 `)       
+
+Diagnostics
+```{r}
+pairs(tc4_stroke_BNMA)
+plot(tc4_stroke_BNMA, ask=F)
+```
+
+```{r}
+mcmc_areas(draws,
+           pars = "rr",
+           prob = 0.95)
+```

@@ -1,0 +1,405 @@
+---
+title: "Table  Mortality"
+author: "Jay Brophy"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document:
+    code_folding: hide
+    highlight: tango
+    theme: cerulean
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+link-citations: yes
+linkcolor: red
+urlcolor: blue
+bibliography: [bib.bib]
+biblio-style: apalike
+---
+
+```{r setup, echo=FALSE, message = FALSE, warning = FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  fig.align = "center")
+
+library(magrittr)
+library(dplyr)
+library(purrr)
+library(forcats)
+library(tidyr)
+library(modelr)
+library(ggdist)
+library(tidybayes)
+library(ggplot2)
+library(cowplot)
+library(rstan)
+library(rstanarm)
+library(brms)
+library(cmdstanr)
+library(RColorBrewer)
+library(here)
+library(knitr)
+library(survey)
+library(tidyverse)
+library(broom)
+library(ggdag)
+library(baymedr) # devtools::install_github("maxlinde/baymedr")
+library(gt) 
+options(knitr.table.format = "html")
+options(knitr.kable.NA = '   ')
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+options(scipen = 1, digits = 3) #set to two decimal 
+
+```
+
+## Mortality
+
+### Vague prior
+
+```{r results='hide', cache=TRUE, warning = FALSE}
+
+data_TC4 <- data.frame(N = c(550,450), y = c(15,7), drug = as.factor(c(0,1))) # 0 = clopidogrel
+
+f = bf(y | trials(N) ~ 0 + drug)
+
+m1 <- brm(
+  formula = f,
+  data = data_TC4,
+  family = binomial(link = "identity"),
+  chains = 4, warmup = 1000, iter = 5000, seed = 123,
+  refresh = 0
+)
+
+
+```
+
+
+```{r}
+
+prior_summary(m1)
+print(m1) # equivalent summary()
+
+draws <- as_draws_df(m1) # posterior_samples is equivalent outdated command
+
+draws <- draws %>% 
+  # rename and drop the unneeded columns
+  transmute(p0 = b_drug0,   # expit not used since identity link
+            p1 = b_drug1) %>% 
+  # compute the OR
+  mutate(or = (p1 / (1 - p1)) / (p0 / (1 - p0)), rr = p1 /p0)
+
+
+temp <- round(quantile(draws$rr, c(0.025, 0.5, 0.975)),2)
+paste0("RR = ", temp[2],  " 95% CI ",  temp[1], " - ", temp[3] )
+
+
+# bleeding model - vg prior
+draws %>% 
+  ggplot(aes(x=rr, y=0)) + 
+  stat_halfeye(.width = c(0.025, 0.975)) + 
+  scale_y_continuous(NULL, breaks = NULL) + 
+  xlab("Mortality RR (ticagrelor vs. clopidogrel[ref])") +
+  theme(panel.grid = element_blank()) +
+  geom_vline(xintercept = c(0.9,1.11), colour="black", linetype="dashed") +
+  geom_vline(xintercept = 1, colour="black", linetype="solid") +
+  scale_x_continuous(limits = c(0, 2), expand = c(0, 0)) +
+  ggtitle("Mortality with vague prior")
+
+
+plot(m1)
+grDevices::cairo_pdf("output/mortality_vg.pdf", width = 6, height = 6, family = "Arial")
+plot(m1, digits = 2, base_size = 10)
+dev.off()
+
+prop0.9 <- sum(draws$rr<0.9)/nrow(draws)
+prop1.0 <- sum(draws$rr<1.0)/nrow(draws)
+prop1.1 <- sum(draws$rr>1.1)/nrow(draws)
+
+cat("Pr(HR<0.9): ", prop0.9,
+    "\nPr(HR<1.0): ", prop1.0,
+    "\nPr(HR>1.1): ", prop1.1,
+    "\nPr(HR[0.9, 1.1]): ", 1-prop1.1-prop0.9)
+
+```
+
+### Informative prior - NA PLATO
+
+Data from here[@PLATO_geo]
+US data from PLATO trial ticagrelor (29/706) vs. clopidogrel (24/707)
+CDN data from PLATO trial ticagrelor (7/201) vs. clopidogrel (5/200)
+
+
+```{r results='hide', cache=TRUE, warning=FALSE}
+# PLATO NA
+# see PI_deaths.Rmd for the data
+
+m1.NA <- brm(
+  formula = f,
+  data = data_TC4,
+  family = binomial(link = "identity"),
+  prior = c(prior(beta(36,871), class = b, coef = "drug1"),
+            prior(beta(29,878),class = b, coef = "drug0")),
+  chains = 4, warmup = 1000, iter = 5000, seed = 123,
+  refresh = 0
+)
+```
+
+
+```{r}
+prior_summary(m1.NA)
+print(m1.NA) # equivalent summary()
+
+draws <- as_draws_df(m1.NA) # posterior_samples is equivalent outdated command
+
+draws <- draws %>% 
+  # rename and drop the unneeded columns
+  transmute(p0 = b_drug0,   # expit not used since identity link
+            p1 = b_drug1) %>% 
+  # compute the OR
+  mutate(or = (p1 / (1 - p1)) / (p0 / (1 - p0)), rr = p1 /p0)
+
+
+temp <- round(quantile(draws$rr, c(0.025, 0.5, 0.975)),2)
+paste0("RR = ", temp[2],  " 95% CI ",  temp[1], " - ", temp[3] )
+
+
+# MACE model - NA prior
+draws %>% 
+  ggplot(aes(x=rr, y=0)) + 
+  stat_halfeye(.width = c(0.025, 0.975)) + 
+  scale_y_continuous(NULL, breaks = NULL) + 
+  xlab("Mortality RR (ticagrelor vs. clopidogrel[ref])") +
+  theme(panel.grid = element_blank()) +
+  geom_vline(xintercept = c(0.9,1.11), colour="black", linetype="dashed") +
+  geom_vline(xintercept = 1, colour="black", linetype="solid") +
+  scale_x_continuous(limits = c(0, 2), expand = c(0, 0)) +
+  ggtitle("Mmortality with PLATO NA only data prior")
+
+
+plot(m1.NA)
+grDevices::cairo_pdf("output/mmortality_na.pdf", width = 6, height = 6, family = "Arial")
+plot(m1.NA, digits = 2, base_size = 10)
+dev.off()
+
+prop0.9 <- sum(draws$rr<0.9)/nrow(draws)
+prop1.0 <- sum(draws$rr<1.0)/nrow(draws)
+prop1.1 <- sum(draws$rr>1.1)/nrow(draws)
+
+cat("Pr(HR<0.9): ", prop0.9,
+    "\nPr(HR<1.0): ", prop1.0,
+    "\nPr(HR>1.1): ", prop1.1,
+    "\nPr(HR[0.9, 1.1]): ", 1-prop1.1-prop0.9)
+
+```
+
+### Informative prior - All PLATO
+
+
+Data from all PLATO data[@PLATO] but using prediction interval for the geo-stratified next study as seen from the following.  
+![](output/PI_deaths_MA1.pdf)
+
+```{r fig.height=12, eval=FALSE}
+knitr::include_graphics("output/PI_deaths_MA1.pdf")
+```
+
+
+```{r results='hide', cache=TRUE, warning=FALSE}
+# All PLATO
+
+m1.PLATO <- brm(
+  formula = f,
+  data = data_TC4,
+  family = binomial(link = "identity"),
+  prior = prior(normal(0.79,.15), class = b, coef = "drug1"),
+  chains = 4, warmup = 1000, iter = 5000, seed = 123,
+  refresh = 0
+)
+```
+
+
+```{r}
+prior_summary(m1.PLATO)
+print(m1.PLATO) # equivalent summary()
+
+draws <- as_draws_df(m1.PLATO) # posterior_samples is equivalent outdated command
+
+draws <- draws %>% 
+  # rename and drop the unneeded columns
+  transmute(p0 = b_drug0,   # expit not used since identity link
+            p1 = b_drug1) %>% 
+  # compute the OR
+  mutate(or = (p1 / (1 - p1)) / (p0 / (1 - p0)), rr = p1 /p0)
+
+
+temp <- round(quantile(draws$rr, c(0.025, 0.5, 0.975)),2)
+paste0("RR = ", temp[2],  " 95% CI ",  temp[1], " - ", temp[3] )
+
+
+# MACE model - PLATO prior
+draws %>% 
+  ggplot(aes(x=rr, y=0)) + 
+  stat_halfeye(.width = c(0.025, 0.975)) + 
+  scale_y_continuous(NULL, breaks = NULL) + 
+  xlab("Mortality RR (ticagrelor vs. clopidogrel[ref])") +
+  theme(panel.grid = element_blank()) +
+  geom_vline(xintercept = c(0.9,1.11), colour="black", linetype="dashed") +
+  geom_vline(xintercept = 1, colour="black", linetype="solid") +
+  scale_x_continuous(limits = c(0, 2), expand = c(0, 0)) +
+  ggtitle("Mortality with all PLATO data prior")
+
+
+plot(m1.PLATO)
+grDevices::cairo_pdf("output/mortality_PLATO.pdf", width = 6, height = 6, family = "Arial")
+plot(m1.PLATO, digits = 2, base_size = 10)
+dev.off()
+
+prop0.9 <- sum(draws$rr<0.9)/nrow(draws)
+prop1.0 <- sum(draws$rr<1.0)/nrow(draws)
+prop1.1 <- sum(draws$rr>1.1)/nrow(draws)
+
+cat("Pr(HR<0.9): ", prop0.9,
+    "\nPr(HR<1.0): ", prop1.0,
+    "\nPr(HR>1.1): ", prop1.1,
+    "\nPr(HR[0.9, 1.1]): ", 1-prop1.1-prop0.9)
+
+```
+
+Prior assuming no between country heterogeneity.   
+
+```{r results='hide', cache=TRUE, warning=FALSE}
+# All PLATO
+
+m2.PLATO <- brm(
+  formula = f,
+  data = data_TC4,
+  family = binomial(link = "identity"),
+  prior = c(prior(beta(901,8432), class = b, coef = "drug1"),
+            prior(beta(1065,8226),class = b, coef = "drug0")),
+  chains = 4, warmup = 1000, iter = 5000, seed = 123,
+  refresh = 0
+)
+```
+
+```{r}
+prior_summary(m1.PLATO)
+print(m1.PLATO) # equivalent summary()
+
+draws <- as_draws_df(m1.PLATO) # posterior_samples is equivalent outdated command
+
+draws <- draws %>% 
+  # rename and drop the unneeded columns
+  transmute(p0 = b_drug0,   # expit not used since identity link
+            p1 = b_drug1) %>% 
+  # compute the OR
+  mutate(or = (p1 / (1 - p1)) / (p0 / (1 - p0)), rr = p1 /p0)
+
+
+temp <- round(quantile(draws$rr, c(0.025, 0.5, 0.975)),2)
+paste0("RR = ", temp[2],  " 95% CI ",  temp[1], " - ", temp[3] )
+
+
+# MACE model - PLATO prior
+draws %>% 
+  ggplot(aes(x=rr, y=0)) + 
+  stat_halfeye(.width = c(0.025, 0.975)) + 
+  scale_y_continuous(NULL, breaks = NULL) + 
+  xlab("Mortality RR (ticagrelor vs. clopidogrel[ref])") +
+  theme(panel.grid = element_blank()) +
+  geom_vline(xintercept = c(0.9,1.11), colour="black", linetype="dashed") +
+  geom_vline(xintercept = 1, colour="black", linetype="solid") +
+  scale_x_continuous(limits = c(0, 2), expand = c(0, 0)) +
+  ggtitle("Mortality with all PLATO data prior")
+
+
+plot(m1.PLATO)
+grDevices::cairo_pdf("output/mortality_PLATO.pdf", width = 6, height = 6, family = "Arial")
+plot(m1.PLATO, digits = 2, base_size = 10)
+dev.off()
+
+prop0.9 <- sum(draws$rr<0.9)/nrow(draws)
+prop1.0 <- sum(draws$rr<1.0)/nrow(draws)
+prop1.1 <- sum(draws$rr>1.1)/nrow(draws)
+
+cat("Pr(HR<0.9): ", prop0.9,
+    "\nPr(HR<1.0): ", prop1.0,
+    "\nPr(HR>1.1): ", prop1.1,
+    "\nPr(HR[0.9, 1.1]): ", 1-prop1.1-prop0.9)
+
+```
+### Informative prior - BNMA
+
+Data from Bayesian network meta-analysisprediction interval for the next study[@Kutcher]
+
+```{r results='hide', cache=TRUE, warning=FALSE}
+# BNMA
+
+m1.BNMA <- brm(
+  formula = f,
+  data = data_TC4,
+  family = binomial(link = "identity"),
+  prior = prior(normal(0.86,.13), class = b, coef = "drug1"), #from PI_deaths.Rmd
+  chains = 4, warmup = 1000, iter = 5000, seed = 123,
+  refresh = 0
+)
+
+
+```
+
+
+```{r}
+prior_summary(m1.BNMA)
+print(m1.BNMA) # equivalent summary()
+
+draws <- as_draws_df(m1.BNMA) # posterior_samples is equivalent outdated command
+
+draws <- draws %>% 
+  # rename and drop the unneeded columns
+  transmute(p0 = b_drug0,   # expit not used since identity link
+            p1 = b_drug1) %>% 
+  # compute the OR
+  mutate(or = (p1 / (1 - p1)) / (p0 / (1 - p0)), rr = p1 /p0)
+
+
+temp <- round(quantile(draws$rr, c(0.025, 0.5, 0.975)),2)
+paste0("RR = ", temp[2],  " 95% CI ",  temp[1], " - ", temp[3] )
+
+
+# MACE model - PLATO prior
+draws %>% 
+  ggplot(aes(x=rr, y=0)) + 
+  stat_halfeye(.width = c(0.025, 0.975)) + 
+  scale_y_continuous(NULL, breaks = NULL) + 
+  xlab("Mortality RR (ticagrelor vs. clopidogrel[ref])") +
+  theme(panel.grid = element_blank()) +
+  geom_vline(xintercept = c(0.9,1.11), colour="black", linetype="dashed") +
+  geom_vline(xintercept = 1, colour="black", linetype="solid") +
+  scale_x_continuous(limits = c(0, 2), expand = c(0, 0)) +
+  ggtitle("Mortality with BNMA data prior")
+
+
+plot(m1.BNMA)
+grDevices::cairo_pdf("output/mmortality_BNMA.pdf", width = 6, height = 6, family = "Arial")
+plot(m1.BNMA, digits = 2, base_size = 10)
+dev.off()
+
+prop0.9 <- sum(draws$rr<0.9)/nrow(draws)
+prop1.0 <- sum(draws$rr<1.0)/nrow(draws)
+prop1.1 <- sum(draws$rr>1.1)/nrow(draws)
+
+cat("Pr(HR<0.9): ", prop0.9,
+    "\nPr(HR<1.0): ", prop1.0,
+    "\nPr(HR>1.1): ", prop1.1,
+    "\nPr(HR[0.9, 1.1]): ", 1-prop1.1-prop0.9)
+
+```
+
+## Session Info
+
+```{r}
+sessionInfo()
+
+```
+
+## References

@@ -1,0 +1,360 @@
+---
+title: "Table2 Posteriors Bleeding"
+author: "Jay Brophy"
+output:
+  html_document:
+    code_folding: hide
+    highlight: tango
+    theme: cerulean
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+bibliography: [bib.bib]
+biblio-style: apalike
+---
+
+```{r setup, include=FALSE, results='hide'}
+knitr::opts_chunk$set(echo = TRUE)
+options(scipen = 1, digits = 3)
+library(tidyverse, brms) #bayesplot to install
+library(brms)
+library(bayesplot)
+library(ggdist)
+library(tidybayes)
+library(ggplot2)
+library(grid)
+library(grDevices)
+library(magrittr)
+library(cmdstanr)
+
+
+#tc4_dat1 <- readRDS("output/tc4_dat1.rds")
+```
+
+## Creating Table 2 Bleeding posterior probabilities
+
+Priors in Table 2 include both vague and informative based on previous studies.
+
+## Vague prior
+### Posterior bleeding - vague prior with identity link
+TC4 data not considering any clustering
+
+```{r cache=TRUE, warning=FALSE, message=FALSE}
+
+TC4_bleeding <- data.frame(y = c(28,20), N = c(555,450), drug = as.factor(c("0","1"))) # 0 = clopidogrel
+
+b_prior_vg <- c(prior(student_t(3, log(1), 5 ), class=b, coef=drug0),
+               prior(student_t(3, log(1), 5 ), class=b, coef=drug1)) # 0 = clopidogrel
+
+f = bf(y | trials(N) ~ 0 + drug)
+
+TC4_bleeding_vg <- brm(
+  formula = f,
+  data = TC4_bleeding,
+  family = binomial(link = "identity"), #identity link probably better than get absolute numbers out can transform post
+  chains = 4, warmup = 1000, iter = 2000, seed = 123,
+  refresh = 0,
+  prior=b_prior_vg, #prior(student_t(3, log(1), 5 ), class=b, coef=dapt_cat1)
+  file = "TC4_bleeding_vg",
+  file_refit = "on_change",
+  refresh = 0
+)
+
+
+prior_summary(TC4_bleeding_vg)
+print(TC4_bleeding_vg) # equivalent summary()
+
+draws <- as_draws_df(TC4_bleeding_vg) # posterior_samples is equivalent outdated command
+
+draws <- draws %>% 
+  # rename and drop the unneeded columns
+  transmute(p0 = b_drug0,   # expit not used since identity link
+            p1 = b_drug1) %>% 
+  # compute the OR
+  mutate(or = (p1 / (1 - p1)) / (p0 / (1 - p0)), rr = p1 /p0)
+
+
+temp <- round(quantile(draws$rr, c(0.025, 0.5, 0.975)),2)
+paste0("RR = ", temp[2],  " 95% CI ",  temp[1], " - ", temp[3] )
+
+
+# bleeding model - vg prior
+draws %>% 
+  ggplot(aes(x=rr, y=0)) + 
+  stat_halfeye(.width = c(0.025, 0.975)) + 
+  scale_y_continuous(NULL, breaks = NULL) + 
+  xlab("Strok RR (ticagrelor vs. clopidogrel[ref])") +
+  theme(panel.grid = element_blank()) +
+  geom_vline(xintercept = c(0.9,1.11), colour="black", linetype="dashed") +
+  geom_vline(xintercept = 1, colour="black", linetype="solid") +
+  scale_x_continuous(limits = c(0, 2), expand = c(0, 0)) +
+  ggtitle("Bleeding with vague prior")
+
+
+plot(TC4_bleeding_vg)
+grDevices::cairo_pdf("output/TC4_bleeding_vg.pdf", width = 6, height = 6, family = "Arial")
+plot(TC4_bleeding_vg, digits = 2, base_size = 10)
+dev.off()
+
+prop0.9_mi <- sum(draws$rr<0.9)/nrow(draws)
+prop1.0_mi <- sum(draws$rr<1.0)/nrow(draws)
+prop1.1_mi <- sum(draws$rr>1.1)/nrow(draws)
+
+cat("Pr(HR<0.9): ", prop0.9_mi,
+    "\nPr(HR<1.0): ", prop1.0_mi,
+    "\nPr(HR>1.1): ", prop1.1_mi,
+    "\nPr(HR[0.9, 1.1]): ", 1-prop1.1_mi-prop0.9_mi)
+
+```
+Using a vague deaths prior , the MI posterior distribution is a N(`r temp[2]`, `r (temp[3] - temp[2])/1.96 `)     
+
+
+Diagnostics
+```{r}
+pairs(TC4_bleeding_vg)
+plot(TC4_bleeding_vg, ask=F)
+```
+
+```{r}
+mcmc_areas(draws,
+           pars = "rr",
+           prob = 0.95)
+```
+
+## PLATO US bleeding prior 
+
+US PLATO bleeding data available from Mahaffey[@PLATO_geo]
+
+Use `brms` to get the posterior distribution for the PLATO US stroke prior
+
+```{r cache=TRUE, warning=FALSE, message=FALSE, results='hide'}
+set.seed(123)
+
+TC4_bleeding_NA <- brm(
+  formula = f,
+  data = TC4_bleeding,
+  family = binomial(link = "identity"), #identity link probably better than get absolute numbers out can transform post
+  chains = 4, warmup = 1000, iter = 2000, seed = 123,
+  refresh = 0,
+  prior = c(prior(beta(74,601), class = b, coef = "drug0"),  
+            prior(beta(77,605),class = b, coef = "drug1")), 
+#  file = "TC4_bleeding_NA",
+#  file_refit = "on_change",
+  refresh = 0
+)
+```
+
+```{r cache=TRUE, warning=FALSE, message=FALSE}
+prior_summary(TC4_bleeding_NA)
+print(TC4_bleeding_NA) # equivalent summary(m_logit)
+
+draws <- as_draws_df(TC4_bleeding_NA) # posterior_samples is equivalent command
+
+draws <- draws %>% 
+  # rename and drop the unneeded columns
+  transmute(p0 = b_drug0,   # expit not used since identity link
+            p1 = b_drug1) %>% 
+  # compute the OR
+  mutate(or = (p1 / (1 - p1)) / (p0 / (1 - p0)), rr = p1 /p0)
+
+temp <- round(quantile(draws$rr, c(0.025, 0.5, 0.975)),2)
+paste0("RR = ", temp[2],  " 95% CI ",  temp[1], " - ", temp[3] )
+
+
+# bleeding model - PLATO prior
+draws %>% 
+  ggplot(aes(x=rr, y=0)) + 
+  stat_halfeye(.width = c(0.025, 0.975)) + 
+  scale_y_continuous(NULL, breaks = NULL) + 
+  xlab("Bleeding RR (ticagrelor vs. clopidogrel[ref])") +
+  theme(panel.grid = element_blank()) +
+  geom_vline(xintercept = c(0.9,1.11), colour="black", linetype="dashed") +
+  geom_vline(xintercept = 1, colour="black", linetype="solid") +
+  scale_x_continuous(limits = c(0.5, 2), expand = c(0, 0)) +
+  ggtitle("Major bleeding with US prior")
+
+
+plot(TC4_bleeding_NA)
+grDevices::cairo_pdf("output/bleeding_NA.pdf", width = 6, height = 6, family = "Arial")
+plot(TC4_bleeding_NA, digits = 2, base_size = 10)
+dev.off()
+
+prop0.9_mi <- sum(draws$rr<0.9)/nrow(draws)
+prop1.0_mi <- sum(draws$rr<1.0)/nrow(draws)
+prop1.1_mi <- sum(draws$rr>1.1)/nrow(draws)
+
+cat("Pr(HR<0.9): ", prop0.9_mi,
+    "\nPr(HR<1.0): ", prop1.0_mi,
+    "\nPr(HR>1.1): ", prop1.1_mi,
+    "\nPr(HR[0.9, 1.1]): ", 1-prop1.1_mi-prop0.9_mi)
+
+```
+
+## PLATO all data bleeding prior 
+
+Use `brms` to get the posterior distribution for the PLATO bleeding prior
+
+```{r cache=TRUE, warning=FALSE, message=FALSE, results='hide'}
+
+TC4_bleeding_PLATO <- brm(
+  formula = f,
+  data = TC4_bleeding,
+  family = binomial(link = "identity"), #identity link probably better than get absolute numbers out can transform post
+  chains = 4, warmup = 1000, iter = 2000, seed = 123,
+  refresh = 0,
+  prior = c(prior(beta(929,8257), class = b, coef = "drug0"),  
+            prior(beta(961,8274),class = b, coef = "drug1")), 
+#  file = "TC4_bleeding_PLATO",
+#  file_refit = "on_change",
+  refresh = 0
+)
+```
+
+```{r cache=TRUE, warning=FALSE, message=FALSE}
+prior_summary(TC4_bleeding_PLATO)
+print(TC4_bleeding_PLATO) # equivalent summary(m_logit)
+
+draws <- as_draws_df(TC4_bleeding_PLATO) # posterior_samples is equivalent command
+
+draws <- draws %>% 
+  # rename and drop the unneeded columns
+  transmute(p0 = b_drug0,   # expit not used since identity link
+            p1 = b_drug1) %>% 
+  # compute the OR
+  mutate(or = (p1 / (1 - p1)) / (p0 / (1 - p0)), rr = p1 /p0)
+
+temp <- round(quantile(draws$rr, c(0.025, 0.5, 0.975)),2)
+paste0("RR = ", temp[2],  " 95% CI ",  temp[1], " - ", temp[3] )
+
+
+# bleeding model - PLATO prior
+draws %>% 
+  ggplot(aes(x=rr, y=0)) + 
+  stat_halfeye(.width = c(0.025, 0.975)) + 
+  scale_y_continuous(NULL, breaks = NULL) + 
+  xlab("bleeding RR (ticagrelor vs. clopidogrel[ref])") +
+  theme(panel.grid = element_blank()) +
+  geom_vline(xintercept = c(0.9,1.11), colour="black", linetype="dashed") +
+  geom_vline(xintercept = 1, colour="black", linetype="solid") +
+  scale_x_continuous(limits = c(0.5, 2), expand = c(0, 0)) +
+  ggtitle("bleeding with PLATO prior")
+
+
+plot(TC4_bleeding_PLATO)
+grDevices::cairo_pdf("output/bleeding_PLATO.pdf", width = 6, height = 6, family = "Arial")
+plot(TC4_bleeding_PLATO, digits = 2, base_size = 10)
+dev.off()
+
+prop0.9_mi <- sum(draws$rr<0.9)/nrow(draws)
+prop1.0_mi <- sum(draws$rr<1.0)/nrow(draws)
+prop1.1_mi <- sum(draws$rr>1.1)/nrow(draws)
+
+cat("Pr(HR<0.9): ", prop0.9_mi,
+    "\nPr(HR<1.0): ", prop1.0_mi,
+    "\nPr(HR>1.1): ", prop1.1_mi,
+    "\nPr(HR[0.9, 1.1]): ", 1-prop1.1_mi-prop0.9_mi)
+
+```
+
+Using a full PLATO bleeding prior, the  bleeding posterior distribution is a N(`r temp[2]`, `r (temp[3] - temp[2])/1.96 `)       
+
+Diagnostics
+```{r}
+pairs(TC4_bleeding_PLATO)
+plot(TC4_bleeding_PLATO, ask=F)
+```
+
+```{r}
+mcmc_areas(draws,
+           pars = "rr",
+           prob = 0.95)
+```
+
+
+## BNMA bleeding prior 
+
+Use BNMA data to create priors for effectiveness of ticagrelor  (203 / 15373) vs. clopidogrel (305 / 25543), which is  N(1.16, 0.16) as the prior for the BNMA data
+
+
+Use `brms` to get the posterior distribution for the BNMA bleeding prior
+
+```{r cache=TRUE, warning=FALSE, message=FALSE, results='hide'}
+
+TC4_bleeding_BNMA <- brm(
+  formula = f,
+  data = TC4_bleeding,
+  family = binomial(link = "identity"), #identity link probably better than get absolute numbers out can transform post
+  chains = 4, warmup = 1000, iter = 2000, seed = 123,
+  refresh = 0,
+#  prior = c(prior(normal(1, .05), class = b, coef ="drug0"),
+#            prior(normal(1.1, 0.06), class = b, coef ="drug1")),
+  prior = c(prior(beta(1030,12149), class = b, coef = "drug0"),  
+           prior(beta(1113,12145),class = b, coef = "drug1")), 
+#  file = "TC4_bleeding_PLATO_brms",
+#  file_refit = "on_change",
+  refresh = 0
+)
+```
+
+```{r cache=TRUE, warning=FALSE, message=FALSE}
+prior_summary(TC4_bleeding_BNMA)
+print(TC4_bleeding_BNMA) # equivalent summary(m_logit)
+
+draws <- as_draws_df(TC4_bleeding_BNMA) # posterior_samples is equivalent command
+
+draws <- draws %>% 
+  # rename and drop the unneeded columns
+  transmute(p0 = b_drug0,   # expit not used since identity link
+            p1 = b_drug1) %>% 
+  # compute the OR
+  mutate(or = (p1 / (1 - p1)) / (p0 / (1 - p0)), rr = p1 /p0)
+
+temp <- round(quantile(draws$rr, c(0.025, 0.5, 0.975)),2)
+paste0("RR = ", temp[2],  " 95% CI ",  temp[1], " - ", temp[3] )
+
+
+# bleeding model - BNMA prior
+draws %>% 
+  ggplot(aes(x=rr, y=0)) + 
+  stat_halfeye(.width = c(0.025, 0.975)) + 
+  scale_y_continuous(NULL, breaks = NULL) + 
+  xlab("bleeding RR (ticagrelor vs. clopidogrel[ref])") +
+  theme(panel.grid = element_blank()) +
+  geom_vline(xintercept = c(0.9,1.11), colour="black", linetype="dashed") +
+  geom_vline(xintercept = 1, colour="black", linetype="solid") +
+  scale_x_continuous(limits = c(0.5, 2), expand = c(0, 0)) +
+  ggtitle("BNMA prior")
+
+
+plot(TC4_bleeding_BNMA)
+grDevices::cairo_pdf("output/bleeding_BNMA.pdf", width = 6, height = 6, family = "Arial")
+plot(TC4_bleeding_BNMA, digits = 2, base_size = 10)
+dev.off()
+
+prop0.9_mi <- sum(draws$rr<0.9)/nrow(draws)
+prop1.0_mi <- sum(draws$rr<1.0)/nrow(draws)
+prop1.1_mi <- sum(draws$rr>1.1)/nrow(draws)
+
+cat("Pr(HR<0.9): ", prop0.9_mi,
+    "\nPr(HR<1.0): ", prop1.0_mi,
+    "\nPr(HR>1.1): ", prop1.1_mi,
+    "\nPr(HR[0.9, 1.1]): ", 1-prop1.1_mi-prop0.9_mi)
+
+```
+
+Using a full PLATO bleeding prior, the  bleeding posterior distribution is a N(`r temp[2]`, `r (temp[3] - temp[2])/1.96 `)       
+
+Diagnostics
+```{r}
+pairs(TC4_bleeding_BNMA)
+plot(TC4_bleeding_BNMA, ask=F)
+```
+
+```{r}
+mcmc_areas(draws,
+           pars = "rr",
+           prob = 0.95)
+```
+## References
